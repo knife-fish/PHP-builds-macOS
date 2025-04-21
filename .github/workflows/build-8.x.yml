@@ -1,0 +1,158 @@
+name: Build PHP Binary with All Extensions and Dynamic Libraries
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-php:
+    runs-on: macos-15-arm64
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install autoconf automake bison re2c libxml2 libxslt libzip openssl@3 icu4c \
+                       libpng jpeg-turbo freetype gmp krb5 libedit oniguruma \
+                       curl sqlite libpq unixodbc openldap tidy-html5 libsodium \
+                       pkg-config llvm imagemagick
+
+      # Checkout PHP source code
+      - name: Checkout PHP source
+        uses: actions/checkout@v4
+        with:
+          repository: php/php-src
+          ref: php-8.4.6
+          path: php-src
+
+      # Configure PHP build
+      - name: Configure PHP
+        working-directory: php-src
+        run: |
+          ./buildconf
+          ./configure \
+            --prefix=$HOME/php-build \
+            --enable-everything \
+            --enable-debug \
+            --with-openssl=/opt/homebrew/opt/openssl@3 \
+            --with-libxml=/opt/homebrew/opt/libxml2 \
+            --with-libxslt=/opt/homebrew/opt/libxslt \
+            --with-zlib \
+            --with-libzip=/opt/homebrew/opt/libzip \
+            --with-pcre-jit \
+            --with-ffi \
+            --with-gmp=/opt/homebrew/opt/gmp \
+            --with-curl=/opt/homebrew/opt/curl \
+            --with-pgsql=/opt/homebrew/opt/libpq \
+            --with-mysqli \
+            --with-pdo-mysql \
+            --with-pdo-pgsql=/opt/homebrew/opt/libpq \
+            --with-pdo-sqlite=/opt/homebrew/opt/sqlite \
+            --with-sqlite3=/opt/homebrew/opt/sqlite \
+            --with-tidy=/opt/homebrew/opt/tidy-html5 \
+            --with-sodium=/opt/homebrew/opt/libsodium \
+            --with-ldap=/opt/homebrew/opt/openldap \
+            --enable-gd \
+            --with-freetype=/opt/homebrew/opt/freetype \
+            --with-jpeg=/opt/homebrew/opt/jpeg-turbo \
+            --with-icu-dir=/opt/homebrew/opt/icu4c \
+            --with-krb5=/opt/homebrew/opt/krb5 \
+            --enable-mbstring \
+            --with-onig=/opt/homebrew/opt/oniguruma \
+            --enable-opcache \
+            --enable-intl \
+            --enable-soap \
+            --enable-xmlrpc \
+            --enable-bcmath \
+            --enable-calendar \
+            --enable-ctype \
+            --enable-dom \
+            --enable-exif \
+            --enable-fileinfo \
+            --enable-ftp \
+            --enable-gettext \
+            --enable-phar \
+            --enable-posix \
+            --enable-shmop \
+            --enable-simplexml \
+            --enable-sockets \
+            --enable-sysvmsg \
+            --enable-sysvsem \
+            --enable-sysvshm \
+            --enable-tokenizer \
+            --enable-xml \
+            --enable-xmlreader \
+            --enable-xmlwriter \
+            --enable-zip \
+            --enable-fpm \
+            --enable-cli \
+            --enable-cgi
+
+      # Build PHP
+      - name: Build PHP
+        working-directory: php-src
+        run: make -j$(sysctl -n hw.ncpu)
+
+      # Install PHP
+      - name: Install PHP
+        working-directory: php-src
+        run: make install
+
+      # Verify PHP installation
+      - name: Verify PHP
+        run: $HOME/php-build/bin/php -v
+
+      # Install PECL extensions
+      - name: Install PECL extensions
+        run: |
+          $HOME/php-build/bin/pecl install imagick
+          $HOME/php-build/bin/pecl install redis
+          echo "extension=imagick.so" >> $HOME/php-build/lib/php.ini
+          echo "extension=redis.so" >> $HOME/php-build/lib/php.ini
+          $HOME/php-build/bin/pecl install xdebug
+          echo "zend_extension=opcache"
+          echo "zend_extension=no-debug-non-zts-20240924/xdebug.so"
+          echo "xdebug.mode=debug"
+          echo "xdebug.discover_client_host=true"
+
+      # Collect dynamic libraries recursively
+      - name: Collect dynamic libraries
+        run: |
+          mkdir -p $HOME/php-build/lib
+          collect_libs() {
+            local binary=$1
+            for lib in $(otool -L "$binary" | grep '/opt/homebrew' | awk '{print $1}'); do
+              if [ ! -f "$HOME/php-build/lib/$(basename "$lib")" ]; then
+                cp -L "$lib" $HOME/php-build/lib/
+                collect_libs "$lib"
+              fi
+            done
+          }
+          collect_libs $HOME/php-build/bin/php
+          collect_libs $HOME/php-build/sbin/php-fpm
+          for so in $HOME/php-build/lib/php/extensions/*/*.so; do
+            collect_libs "$so"
+          done
+          ls -l $HOME/php-build/lib
+
+      # Package binaries and libraries
+      - name: Package PHP build
+        run: |
+          tar -czf php-build.tar.gz -C $HOME/php-build .
+          ls -l php-build.tar.gz
+
+      # Upload artifacts
+      - name: Upload PHP binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-build
+          path: php-build.tar.gz
